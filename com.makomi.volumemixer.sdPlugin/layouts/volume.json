@@ -20,7 +20,7 @@
     {
       "key": "levelText",
       "type": "text",
-      "rect": [120, 42, 68, 28],
+      "rect": [106, 42, 82, 28],
       "alignment": "right",
       "font": { "size": 23, "weight": 600 },
       "color": "#ffffff",
