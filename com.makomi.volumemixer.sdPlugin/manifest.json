@@ -1,0 +1,63 @@
+{
+  "SDKVersion": 2,
+  "Version": "1.0.0",
+  "Name": "Volume Mixer",
+  "Description": "Control Windows Volume Mixer with Stream Deck Plus encoders. Select a specific app or auto-follow the active window.",
+  "Author": "makomi",
+  "Actions": [
+    {
+      "UUID": "com.makomi.volumemixer.appvolume",
+      "Name": "App Volume",
+      "Tooltip": "Control volume of a chosen application",
+      "Icon": "imgs/actions/AppVolume/action",
+      "States": [{ "Image": "imgs/actions/AppVolume/key" }],
+      "Controllers": ["Encoder"],
+      "Encoder": {
+        "layout": "layouts/volume.json",
+        "TriggerDescription": {
+          "Rotate": "Adjust volume",
+          "Push": "Toggle mute",
+          "Touch": "Reset to 100%",
+          "LongTouch": "Set to 0%"
+        }
+      },
+      "PropertyInspectorPath": "ui/app-volume.html"
+    },
+    {
+      "UUID": "com.makomi.volumemixer.activewindow",
+      "Name": "Active Window Volume",
+      "Tooltip": "Control volume of the currently focused application",
+      "Icon": "imgs/actions/ActiveWindow/action",
+      "States": [{ "Image": "imgs/actions/ActiveWindow/key" }],
+      "Controllers": ["Encoder"],
+      "Encoder": {
+        "layout": "layouts/volume.json",
+        "TriggerDescription": {
+          "Rotate": "Adjust volume",
+          "Push": "Toggle mute",
+          "Touch": "Reset to 100%",
+          "LongTouch": "Set to 0%"
+        }
+      },
+      "PropertyInspectorPath": "ui/active-window.html"
+    }
+  ],
+  "Category": "Volume Mixer",
+  "CategoryIcon": "imgs/category",
+  "CodePath": "bin/plugin.js",
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "enabled"
+  },
+  "Software": {
+    "MinimumVersion": "6.4"
+  },
+  "Icon": "imgs/plugin",
+  "URL": "",
+  "OS": [
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ]
+}

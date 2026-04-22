@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>App Volume</title>
+  <style>
+    :root { --sdpi-bgcolor: #1e1e1e; --sdpi-color: #c8c8c8; --sdpi-accent: #4c9be8; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--sdpi-bgcolor); color: var(--sdpi-color); font: 13px/1.5 -apple-system, sans-serif; padding: 10px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    label { flex: 0 0 90px; font-size: 12px; color: #aaa; }
+    select, input[type=range] { flex: 1; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; color: var(--sdpi-color); padding: 4px 6px; }
+    select { height: 28px; }
+    button { background: #2a2a2a; border: 1px solid #555; border-radius: 4px; color: var(--sdpi-color); padding: 4px 10px; cursor: pointer; font-size: 12px; }
+    button:hover { background: #3a3a3a; }
+    .hint { font-size: 11px; color: #888; margin-top: 4px; }
+    span.val { min-width: 32px; text-align: right; font-size: 12px; }
+    .app-list { display: grid; gap: 6px; margin: 4px 0 12px 90px; max-height: 178px; overflow: auto; }
+    .app-card { display: grid; grid-template-columns: 24px 1fr auto; align-items: center; gap: 8px; width: 100%; min-height: 34px; padding: 5px 8px; text-align: left; }
+    .app-card.selected { border-color: var(--sdpi-accent); background: #233143; }
+    .app-card img { width: 22px; height: 22px; object-fit: contain; }
+    .app-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .app-process { color: #8d8d8d; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="row">
+    <label>Application</label>
+    <select id="appSelect">
+      <option value="">Loading…</option>
+    </select>
+    <button id="refreshBtn" title="Refresh list">⟳</button>
+  </div>
+  <div class="app-list" id="appList"></div>
+  <div class="row">
+    <label>Sensitivity</label>
+    <input type="range" id="sensitivity" min="1" max="10" value="2" />
+    <span class="val" id="sensLabel">2%</span>
+  </div>
+  <p class="hint">Rotate = volume · Press = mute · Touch = reset to 100%</p>
+
+  <script>
+    // connectElgatoStreamDeckSocket is called by Stream Deck software
+    // eslint-disable-next-line no-unused-vars
+    function connectElgatoStreamDeckSocket(port, uuid, registerEvent, appInfo) {
+      const ws = new WebSocket("ws://127.0.0.1:" + port);
+      let settings = {};
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ event: registerEvent, uuid }));
+        ws.send(JSON.stringify({ event: "getSettings", context: uuid }));
+      };
+
+      ws.onmessage = (evt) => {
+        const data = JSON.parse(evt.data);
+
+        if (data.event === "didReceiveSettings") {
+          settings = data.payload?.settings ?? {};
+          applySettings();
+          requestSessions();
+        }
+
+        if (data.event === "sendToPropertyInspector") {
+          const { sessions } = data.payload ?? {};
+          if (sessions) populateSessions(sessions);
+        }
+      };
+
+      function requestSessions() {
+        ws.send(JSON.stringify({
+          event: "sendToPlugin",
+          context: uuid,
+          payload: { event: "requestSessions" }
+        }));
+      }
+
+      function populateSessions(sessions) {
+        const sel = document.getElementById("appSelect");
+        const list = document.getElementById("appList");
+        const current = settings.processName ?? "";
+        sel.innerHTML = '<option value="">— select app —</option>';
+        list.innerHTML = "";
+
+        const grouped = Array.from(
+          sessions.reduce((map, session) => {
+            if (!map.has(session.name)) map.set(session.name, []);
+            map.get(session.name).push(session);
+            return map;
+          }, new Map()).values()
+        ).map(group => ({
+          ...group[0],
+          count: group.length
+        }));
+
+        grouped.forEach(s => {
+          const displayLabel = s.windowTitle || s.displayName || s.name;
+          const opt = document.createElement("option");
+          opt.value = s.name;
+          opt.textContent = displayLabel + (s.count > 1 ? ` (${s.count} sessions)` : ` (${s.name})`);
+          if (s.name === current) opt.selected = true;
+          sel.appendChild(opt);
+
+          const btn = document.createElement("button");
+          btn.type = "button";
+          btn.className = "app-card" + (s.name === current ? " selected" : "");
+          btn.onclick = () => {
+            settings.processName = s.name;
+            sel.value = s.name;
+            save();
+            populateSessions(sessions);
+          };
+
+          const img = document.createElement("img");
+          img.alt = "";
+          img.src = s.icon || "../imgs/actions/AppVolume/action.png";
+
+          const name = document.createElement("span");
+          name.className = "app-name";
+          name.textContent = displayLabel;
+
+          const meta = document.createElement("span");
+          meta.className = "app-process";
+          meta.textContent = s.count > 1 ? `${s.count} sessions` : s.name;
+
+          btn.appendChild(img);
+          btn.appendChild(name);
+          btn.appendChild(meta);
+          list.appendChild(btn);
+        });
+        if (current && !grouped.find(s => s.name === current)) {
+          const opt = document.createElement("option");
+          opt.value = current;
+          opt.textContent = current + " (not running)";
+          opt.selected = true;
+          sel.appendChild(opt);
+        }
+      }
+
+      function applySettings() {
+        const sens = Math.round((settings.sensitivity ?? 0.02) * 100);
+        const slider = document.getElementById("sensitivity");
+        slider.value = Math.max(1, Math.min(10, sens));
+        document.getElementById("sensLabel").textContent = slider.value + "%";
+      }
+
+      function save() {
+        ws.send(JSON.stringify({ event: "setSettings", context: uuid, payload: settings }));
+      }
+
+      document.getElementById("appSelect").onchange = (e) => {
+        settings.processName = e.target.value || undefined;
+        save();
+      };
+
+      document.getElementById("sensitivity").oninput = (e) => {
+        const v = parseInt(e.target.value);
+        settings.sensitivity = v / 100;
+        document.getElementById("sensLabel").textContent = v + "%";
+        save();
+      };
+
+      document.getElementById("refreshBtn").onclick = requestSessions;
+    }
+  </script>
+</body>
+</html>

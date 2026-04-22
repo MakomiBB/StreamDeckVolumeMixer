@@ -1,0 +1,15 @@
+.claude/
+/package-lock.json
+**/node_modules/
+**/logs/
+**/.DS_Store
+**/Thumbs.db
+
+# Keep the current distributable plugin/runtime artifacts, ignore stale helper names.
+com.makomi.volumemixer.sdPlugin/native/bin/VolumeController.exe
+com.makomi.volumemixer.sdPlugin/native/bin/VolumeControllerHelper.exe
+
+# Local packaging/output scratch files.
+*.streamDeckPlugin
+dist/
+tmp/

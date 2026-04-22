@@ -1,0 +1,42 @@
+{
+  "id": "com.makomi.volumemixer.volume",
+  "items": [
+    {
+      "key": "icon",
+      "type": "pixmap",
+      "rect": [10, 43, 44, 44],
+      "zOrder": 1
+    },
+    {
+      "key": "appName",
+      "type": "text",
+      "rect": [8, 10, 120, 24],
+      "alignment": "left",
+      "font": { "size": 16, "weight": 600 },
+      "color": "#ffffff",
+      "text-overflow": "ellipsis",
+      "zOrder": 2
+    },
+    {
+      "key": "levelText",
+      "type": "text",
+      "rect": [120, 42, 68, 28],
+      "alignment": "right",
+      "font": { "size": 23, "weight": 600 },
+      "color": "#ffffff",
+      "text-overflow": "ellipsis",
+      "zOrder": 2
+    },
+    {
+      "key": "levelBar",
+      "type": "bar",
+      "rect": [72, 75, 116, 12],
+      "value": 0,
+      "bar_bg_c": "#66ffffff",
+      "bar_fill_c": "#ffffff",
+      "border_w": 0,
+      "subtype": 4,
+      "zOrder": 2
+    }
+  ]
+}

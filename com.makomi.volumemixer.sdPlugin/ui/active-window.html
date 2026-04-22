@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Active Window Volume</title>
+  <style>
+    :root { --sdpi-bgcolor: #1e1e1e; --sdpi-color: #c8c8c8; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--sdpi-bgcolor); color: var(--sdpi-color); font: 13px/1.5 -apple-system, sans-serif; padding: 10px; }
+    .row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+    label { flex: 0 0 90px; font-size: 12px; color: #aaa; }
+    input[type=range] { flex: 1; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; color: var(--sdpi-color); }
+    span.val { min-width: 32px; text-align: right; font-size: 12px; }
+    .hint { font-size: 11px; color: #888; margin-top: 4px; }
+    .status { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 8px; min-height: 40px; margin-bottom: 12px; padding: 6px 8px; background: #242424; border: 1px solid #3a3a3a; border-radius: 4px; }
+    .status img { width: 26px; height: 26px; object-fit: contain; }
+    .status-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .status-meta { color: #8d8d8d; font-size: 11px; }
+  </style>
+</head>
+<body>
+  <div class="status" id="status">
+    <img id="appIcon" alt="" src="../imgs/actions/ActiveWindow/action.png" />
+    <div>
+      <div class="status-title" id="appName">Active window</div>
+      <div class="status-meta" id="appMeta">Waiting for focus</div>
+    </div>
+    <span class="val" id="appVolume">—</span>
+  </div>
+  <div class="row">
+    <label>Sensitivity</label>
+    <input type="range" id="sensitivity" min="1" max="10" value="2" />
+    <span class="val" id="sensLabel">2%</span>
+  </div>
+  <p class="hint">Rotate = volume of active window · Press = mute · Touch = reset to 100%</p>
+  <p class="hint" style="margin-top:6px">Display updates automatically as you switch apps.</p>
+
+  <script>
+    // eslint-disable-next-line no-unused-vars
+    function connectElgatoStreamDeckSocket(port, uuid, registerEvent) {
+      const ws = new WebSocket("ws://127.0.0.1:" + port);
+      let settings = {};
+
+      ws.onopen = () => {
+        ws.send(JSON.stringify({ event: registerEvent, uuid }));
+        ws.send(JSON.stringify({ event: "getSettings", context: uuid }));
+      };
+
+      ws.onmessage = (evt) => {
+        const data = JSON.parse(evt.data);
+        if (data.event === "didReceiveSettings") {
+          settings = data.payload?.settings ?? {};
+          applySettings();
+          requestForeground();
+        }
+
+        if (data.event === "sendToPropertyInspector") {
+          renderForeground(data.payload?.foreground);
+        }
+      };
+
+      setInterval(requestForeground, 1200);
+
+      function requestForeground() {
+        if (ws.readyState !== WebSocket.OPEN) return;
+        ws.send(JSON.stringify({
+          event: "sendToPlugin",
+          context: uuid,
+          payload: { event: "requestForeground" }
+        }));
+      }
+
+      function renderForeground(fg) {
+        const icon = document.getElementById("appIcon");
+        const name = document.getElementById("appName");
+        const meta = document.getElementById("appMeta");
+        const volume = document.getElementById("appVolume");
+
+        if (!fg) {
+          icon.src = "../imgs/actions/ActiveWindow/action.png";
+          name.textContent = "Active window";
+          meta.textContent = "No focused app";
+          volume.textContent = "—";
+          return;
+        }
+
+        icon.src = fg.icon || "../imgs/actions/ActiveWindow/action.png";
+        name.textContent = fg.displayName || fg.name;
+        meta.textContent = fg.hasAudio ? fg.name : "No audio session";
+        volume.textContent = fg.hasAudio
+          ? (fg.muted ? "Muted" : Math.round(fg.volume * 100) + "%")
+          : "—";
+      }
+
+      function applySettings() {
+        const sens = Math.round((settings.sensitivity ?? 0.02) * 100);
+        const slider = document.getElementById("sensitivity");
+        slider.value = Math.max(1, Math.min(10, sens));
+        document.getElementById("sensLabel").textContent = slider.value + "%";
+      }
+
+      function save() {
+        ws.send(JSON.stringify({ event: "setSettings", context: uuid, payload: settings }));
+      }
+
+      document.getElementById("sensitivity").oninput = (e) => {
+        const v = parseInt(e.target.value);
+        settings.sensitivity = v / 100;
+        document.getElementById("sensLabel").textContent = v + "%";
+        save();
+      };
+    }
+  </script>
+</body>
+</html>
