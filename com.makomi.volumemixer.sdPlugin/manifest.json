@@ -1,6 +1,6 @@
 {
   "SDKVersion": 2,
-  "Version": "1.0.0",
+  "Version": "1.1.0",
   "Name": "Volume Mixer",
   "Description": "Control Windows Volume Mixer with Stream Deck Plus encoders. Select a specific app or auto-follow the active window.",
   "Author": "makomi",
