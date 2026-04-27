@@ -11,5 +11,9 @@ com.makomi.volumemixer.sdPlugin/native/bin/VolumeControllerHelper.exe
 
 # Local packaging/output scratch files.
 *.streamDeckPlugin
+com.makomi.volumemixer.sdPlugin-*.zip
 dist/
 tmp/
+
+# Local Codex project memory.
+CODEX_READ_FIRST.md
