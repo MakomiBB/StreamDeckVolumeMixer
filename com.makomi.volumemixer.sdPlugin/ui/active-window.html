@@ -11,11 +11,16 @@
     label { flex: 0 0 90px; font-size: 12px; color: #aaa; }
     input[type=range] { flex: 1; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; color: var(--sdpi-color); }
     span.val { min-width: 32px; text-align: right; font-size: 12px; }
-    .hint { font-size: 11px; color: #888; margin-top: 4px; }
+    .hint { font-size: 11px; color: #888; margin-top: 6px; }
     .status { display: grid; grid-template-columns: 28px 1fr auto; align-items: center; gap: 8px; min-height: 40px; margin-bottom: 12px; padding: 6px 8px; background: #242424; border: 1px solid #3a3a3a; border-radius: 4px; }
     .status img { width: 26px; height: 26px; object-fit: contain; }
     .status-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .status-meta { color: #8d8d8d; font-size: 11px; }
+    .stack { display: grid; gap: 8px; margin-top: 12px; }
+    textarea { width: 100%; min-height: 72px; resize: vertical; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; color: var(--sdpi-color); padding: 6px 8px; font: 12px/1.4 Consolas, monospace; }
+    button { background: #2a2a2a; border: 1px solid #555; border-radius: 4px; color: var(--sdpi-color); padding: 4px 10px; cursor: pointer; font-size: 12px; }
+    button:hover { background: #3a3a3a; }
+    button:disabled { opacity: 0.5; cursor: default; }
   </style>
 </head>
 <body>
@@ -25,15 +30,29 @@
       <div class="status-title" id="appName">Active window</div>
       <div class="status-meta" id="appMeta">Waiting for focus</div>
     </div>
-    <span class="val" id="appVolume">—</span>
+    <span class="val" id="appVolume">-</span>
   </div>
+
   <div class="row">
     <label>Sensitivity</label>
     <input type="range" id="sensitivity" min="1" max="10" value="2" />
     <span class="val" id="sensLabel">2%</span>
   </div>
-  <p class="hint">Rotate = volume of active window · Press = mute · Touch = reset to 100%</p>
-  <p class="hint" style="margin-top:6px">Display updates automatically as you switch apps.</p>
+
+  <div class="stack">
+    <div class="row" style="align-items:flex-start; margin-bottom:0">
+      <label>Ignore apps</label>
+      <textarea id="ignoredProcesses" placeholder="powershell&#10;windowsterminal&#10;chrome"></textarea>
+    </div>
+    <div class="row" style="margin-bottom:0">
+      <label></label>
+      <button id="ignoreCurrentBtn" type="button" disabled>Ignore current</button>
+    </div>
+  </div>
+
+  <p class="hint">Rotate = volume of active window | Press = mute | Touch = reset to 100%</p>
+  <p class="hint">Display updates automatically as you switch apps. Ignored apps keep the previous audio target.</p>
+  <p class="hint" id="logPathHint">Debug log: waiting...</p>
 
   <script>
     // eslint-disable-next-line no-unused-vars
@@ -55,6 +74,13 @@
         }
 
         if (data.event === "sendToPropertyInspector") {
+          if (Array.isArray(data.payload?.ignoredProcesses)) {
+            settings.ignoredProcesses = data.payload.ignoredProcesses;
+          }
+          if (data.payload?.logPath) {
+            document.getElementById("logPathHint").textContent = "Debug log: " + data.payload.logPath;
+          }
+          applyIgnoredProcesses();
           renderForeground(data.payload?.foreground);
         }
       };
@@ -75,21 +101,24 @@
         const name = document.getElementById("appName");
         const meta = document.getElementById("appMeta");
         const volume = document.getElementById("appVolume");
+        const ignoreCurrentBtn = document.getElementById("ignoreCurrentBtn");
 
         if (!fg) {
           icon.src = "../imgs/actions/ActiveWindow/action.png";
           name.textContent = "Active window";
           meta.textContent = "No focused app";
-          volume.textContent = "—";
+          volume.textContent = "-";
+          ignoreCurrentBtn.disabled = true;
+          ignoreCurrentBtn.dataset.processName = "";
           return;
         }
 
         icon.src = fg.icon || "../imgs/actions/ActiveWindow/action.png";
         name.textContent = fg.displayName || fg.name;
-        meta.textContent = fg.hasAudio ? fg.name : "No audio session";
-        volume.textContent = fg.hasAudio
-          ? (fg.muted ? "Muted" : Math.round(fg.volume * 100) + "%")
-          : "—";
+        meta.textContent = fg.ignored ? (fg.name + " (ignored)") : (fg.hasAudio ? fg.name : "No audio session");
+        volume.textContent = fg.hasAudio ? (fg.muted ? "Muted" : Math.round(fg.volume * 100) + "%") : "-";
+        ignoreCurrentBtn.disabled = !fg.name;
+        ignoreCurrentBtn.dataset.processName = fg.name || "";
       }
 
       function applySettings() {
@@ -97,6 +126,21 @@
         const slider = document.getElementById("sensitivity");
         slider.value = Math.max(1, Math.min(10, sens));
         document.getElementById("sensLabel").textContent = slider.value + "%";
+        applyIgnoredProcesses();
+      }
+
+      function applyIgnoredProcesses() {
+        const textarea = document.getElementById("ignoredProcesses");
+        const values = Array.isArray(settings.ignoredProcesses) ? settings.ignoredProcesses : [];
+        textarea.value = values.join("\n");
+      }
+
+      function uniqueNormalizedProcesses(values) {
+        return Array.from(new Set(
+          values
+            .map(v => (v || "").trim().toLowerCase().replace(/\.exe$/i, ""))
+            .filter(Boolean)
+        ));
       }
 
       function save() {
@@ -104,10 +148,30 @@
       }
 
       document.getElementById("sensitivity").oninput = (e) => {
-        const v = parseInt(e.target.value);
+        const v = parseInt(e.target.value, 10);
         settings.sensitivity = v / 100;
         document.getElementById("sensLabel").textContent = v + "%";
         save();
+      };
+
+      document.getElementById("ignoredProcesses").onchange = (e) => {
+        settings.ignoredProcesses = uniqueNormalizedProcesses(e.target.value.split(/\r?\n|,/));
+        applyIgnoredProcesses();
+        save();
+        requestForeground();
+      };
+
+      document.getElementById("ignoreCurrentBtn").onclick = (e) => {
+        const processName = e.target.dataset.processName || "";
+        if (!processName) return;
+
+        settings.ignoredProcesses = uniqueNormalizedProcesses([
+          ...(Array.isArray(settings.ignoredProcesses) ? settings.ignoredProcesses : []),
+          processName
+        ]);
+        applyIgnoredProcesses();
+        save();
+        requestForeground();
       };
     }
   </script>

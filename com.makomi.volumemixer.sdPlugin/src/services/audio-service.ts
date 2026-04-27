@@ -2,6 +2,7 @@ import { spawn, ChildProcess } from "child_process";
 import path from "path";
 import { EventEmitter } from "events";
 import type { JsonValue } from "@elgato/utils";
+import { writeDebugLog } from "./debug-log";
 
 export interface AudioSession {
   [key: string]: JsonValue;
@@ -33,6 +34,8 @@ class AudioService extends EventEmitter {
   private iconCache = new Map<number, string | null>();
   private sessionsCache: { at: number; value: AudioSession[] } | null = null;
   private foregroundCache: { at: number; value: { pid: number; name: string; title?: string } | null } | null = null;
+  private lastLoggedForeground = "";
+  private lastLoggedSessionsSignature = "";
 
   constructor() {
     super();
@@ -44,6 +47,7 @@ class AudioService extends EventEmitter {
   }
 
   private start(): void {
+    writeDebugLog("audio-service", "starting helper", { helperPath: this.helperPath() });
     this.proc = spawn(this.helperPath(), [], {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
@@ -76,15 +80,18 @@ class AudioService extends EventEmitter {
     });
 
     this.proc.stderr?.setEncoding("utf8").on("data", (d: string) => {
+      writeDebugLog("audio-service", "helper stderr", { message: d.trim() });
       console.error("[VolumeController]", d.trim());
     });
 
     this.proc.on("error", (err) => {
+      writeDebugLog("audio-service", "helper failed to start", { error: String(err) });
       console.error("[VolumeController] failed to start", err);
       this.rejectPending(err);
     });
 
     this.proc.on("exit", (code) => {
+      writeDebugLog("audio-service", "helper exited", { code });
       this.rejectPending(new Error(`VolumeController exited (${code})`));
       if (!this.restarting) {
         console.error(`[VolumeController] exited (${code}), restarting in 1s…`);
@@ -145,6 +152,7 @@ class AudioService extends EventEmitter {
     const res = await this.send<{ sessions: AudioSession[] }>({ cmd: "list" });
     const sessions = res.sessions ?? [];
     this.sessionsCache = { at: now, value: sessions };
+    this.logSessionsSnapshot(sessions);
     return sessions;
   }
 
@@ -179,6 +187,7 @@ class AudioService extends EventEmitter {
     const res = await this.send<{ pid: number; name: string; title?: string }>({ cmd: "foreground" });
     const foreground = res.pid > 0 ? res : null;
     this.foregroundCache = { at: now, value: foreground };
+    this.logForegroundSnapshot(foreground);
     return foreground;
   }
 
@@ -206,6 +215,36 @@ class AudioService extends EventEmitter {
         session.pid === pid ? { ...session, ...patch } : session
       ),
     };
+  }
+
+  private logForegroundSnapshot(foreground: { pid: number; name: string; title?: string } | null): void {
+    const signature = foreground
+      ? `${foreground.pid}:${foreground.name}:${foreground.title ?? ""}`
+      : "none";
+    if (signature === this.lastLoggedForeground) return;
+
+    this.lastLoggedForeground = signature;
+    writeDebugLog("audio-service", "foreground changed", foreground);
+  }
+
+  private logSessionsSnapshot(sessions: AudioSession[]): void {
+    const top = sessions
+      .slice()
+      .sort((a, b) => a.name.localeCompare(b.name) || a.pid - b.pid)
+      .slice(0, 8)
+      .map((session) => ({
+        pid: session.pid,
+        name: session.name,
+        displayName: session.displayName,
+        windowTitle: session.windowTitle ?? "",
+        volume: Math.round(session.volume * 100),
+        muted: session.muted,
+      }));
+    const signature = JSON.stringify(top);
+    if (signature === this.lastLoggedSessionsSignature) return;
+
+    this.lastLoggedSessionsSignature = signature;
+    writeDebugLog("audio-service", "sessions changed", { count: sessions.length, top });
   }
 }
 

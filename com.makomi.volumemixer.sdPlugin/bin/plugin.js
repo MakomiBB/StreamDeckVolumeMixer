@@ -16,6 +16,8 @@ var node_process = require('node:process');
 var node_crypto = require('node:crypto');
 var child_process = require('child_process');
 var path$1 = require('path');
+var fs$1 = require('fs');
+var os = require('os');
 
 /**
  * Default language supported by all i18n providers.
@@ -8220,6 +8222,50 @@ typeof SuppressedError === "function" ? SuppressedError : function (error, suppr
     return e.name = "SuppressedError", e.error = error, e.suppressed = suppressed, e;
 };
 
+const LOG_PATH = path$1.join(os.tmpdir(), "focused-app-volume-debug.log");
+const MAX_LOG_SIZE = 512 * 1024;
+function rotateIfNeeded() {
+    try {
+        const stat = fs$1.statSync(LOG_PATH);
+        if (stat.size < MAX_LOG_SIZE)
+            return;
+        const archive = `${LOG_PATH}.1`;
+        try {
+            if (fs$1.existsSync(archive))
+                fs$1.unlinkSync(archive);
+        }
+        catch {
+            // ignore archive cleanup issues
+        }
+        fs$1.renameSync(LOG_PATH, archive);
+    }
+    catch {
+        // no existing log or rotation failure
+    }
+}
+function writeDebugLog(scope, message, details) {
+    try {
+        rotateIfNeeded();
+        const timestamp = new Date().toISOString();
+        const suffix = details === undefined ? "" : ` ${safeStringify(details)}`;
+        fs$1.appendFileSync(LOG_PATH, `[${timestamp}] [${scope}] ${message}${suffix}\n`, "utf8");
+    }
+    catch {
+        // never let logging break plugin behavior
+    }
+}
+function getDebugLogPath() {
+    return LOG_PATH;
+}
+function safeStringify(value) {
+    try {
+        return JSON.stringify(value);
+    }
+    catch {
+        return String(value);
+    }
+}
+
 class AudioService extends require$$0$3.EventEmitter {
     proc = null;
     buffer = "";
@@ -8229,6 +8275,8 @@ class AudioService extends require$$0$3.EventEmitter {
     iconCache = new Map();
     sessionsCache = null;
     foregroundCache = null;
+    lastLoggedForeground = "";
+    lastLoggedSessionsSignature = "";
     constructor() {
         super();
         this.start();
@@ -8237,6 +8285,7 @@ class AudioService extends require$$0$3.EventEmitter {
         return path$1.join(__dirname, "../native/bin/VolumeControllerHelper2.exe");
     }
     start() {
+        writeDebugLog("audio-service", "starting helper", { helperPath: this.helperPath() });
         this.proc = child_process.spawn(this.helperPath(), [], {
             stdio: ["pipe", "pipe", "pipe"],
             windowsHide: true,
@@ -8269,13 +8318,16 @@ class AudioService extends require$$0$3.EventEmitter {
             }
         });
         this.proc.stderr?.setEncoding("utf8").on("data", (d) => {
+            writeDebugLog("audio-service", "helper stderr", { message: d.trim() });
             console.error("[VolumeController]", d.trim());
         });
         this.proc.on("error", (err) => {
+            writeDebugLog("audio-service", "helper failed to start", { error: String(err) });
             console.error("[VolumeController] failed to start", err);
             this.rejectPending(err);
         });
         this.proc.on("exit", (code) => {
+            writeDebugLog("audio-service", "helper exited", { code });
             this.rejectPending(new Error(`VolumeController exited (${code})`));
             if (!this.restarting) {
                 console.error(`[VolumeController] exited (${code}), restarting in 1s…`);
@@ -8330,6 +8382,7 @@ class AudioService extends require$$0$3.EventEmitter {
         const res = await this.send({ cmd: "list" });
         const sessions = res.sessions ?? [];
         this.sessionsCache = { at: now, value: sessions };
+        this.logSessionsSnapshot(sessions);
         return sessions;
     }
     async getVolume(pid) {
@@ -8358,6 +8411,7 @@ class AudioService extends require$$0$3.EventEmitter {
         const res = await this.send({ cmd: "foreground" });
         const foreground = res.pid > 0 ? res : null;
         this.foregroundCache = { at: now, value: foreground };
+        this.logForegroundSnapshot(foreground);
         return foreground;
     }
     async getIcon(pid) {
@@ -8379,6 +8433,34 @@ class AudioService extends require$$0$3.EventEmitter {
             at: Date.now(),
             value: this.sessionsCache.value.map((session) => session.pid === pid ? { ...session, ...patch } : session),
         };
+    }
+    logForegroundSnapshot(foreground) {
+        const signature = foreground
+            ? `${foreground.pid}:${foreground.name}:${foreground.title ?? ""}`
+            : "none";
+        if (signature === this.lastLoggedForeground)
+            return;
+        this.lastLoggedForeground = signature;
+        writeDebugLog("audio-service", "foreground changed", foreground);
+    }
+    logSessionsSnapshot(sessions) {
+        const top = sessions
+            .slice()
+            .sort((a, b) => a.name.localeCompare(b.name) || a.pid - b.pid)
+            .slice(0, 8)
+            .map((session) => ({
+            pid: session.pid,
+            name: session.name,
+            displayName: session.displayName,
+            windowTitle: session.windowTitle ?? "",
+            volume: Math.round(session.volume * 100),
+            muted: session.muted,
+        }));
+        const signature = JSON.stringify(top);
+        if (signature === this.lastLoggedSessionsSignature)
+            return;
+        this.lastLoggedSessionsSignature = signature;
+        writeDebugLog("audio-service", "sessions changed", { count: sessions.length, top });
     }
 }
 const audioService = new AudioService();
@@ -8526,6 +8608,47 @@ function formatAppName(name) {
 function normalizeAppKey(value) {
     return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
 }
+function stripExecutableSuffix(value) {
+    return value.replace(/\.exe$/i, "");
+}
+function stripWrapperSuffixes(value) {
+    return value.replace(/(portable|launcher|client|helper|overlay|updater|service|bootstrapper)+$/g, "");
+}
+function buildAppAliases(value) {
+    const normalized = normalizeAppKey(stripExecutableSuffix(value ?? ""));
+    if (!normalized)
+        return [];
+    const aliases = new Set([normalized]);
+    const stripped = stripWrapperSuffixes(normalized);
+    if (stripped)
+        aliases.add(stripped);
+    if (normalized.endsWith("64") || normalized.endsWith("32")) {
+        aliases.add(normalized.replace(/(64|32)$/g, ""));
+    }
+    if (stripped.endsWith("64") || stripped.endsWith("32")) {
+        aliases.add(stripped.replace(/(64|32)$/g, ""));
+    }
+    return Array.from(aliases).filter(Boolean);
+}
+function aliasMatches(left, right) {
+    const leftAliases = buildAppAliases(left);
+    const rightAliases = buildAppAliases(right);
+    return leftAliases.some((l) => rightAliases.some((r) => l === r || l.includes(r) || r.includes(l)));
+}
+function scoreAliasOverlap(left, right) {
+    const leftAliases = buildAppAliases(left);
+    const rightAliases = buildAppAliases(right);
+    let score = 0;
+    for (const l of leftAliases) {
+        for (const r of rightAliases) {
+            if (l === r)
+                score = Math.max(score, 120);
+            else if (l && r && (l.includes(r) || r.includes(l)))
+                score = Math.max(score, 70);
+        }
+    }
+    return score;
+}
 const GAME_PROCESS_HINTS = [
     "helldivers",
     "cyberpunk",
@@ -8615,7 +8738,9 @@ function isLauncherOrOverlaySurface(foreground) {
         title.includes("steam") ||
         title.includes("epicgames") ||
         title.includes("gamebar") ||
-        title.includes("xbox"));
+        title.includes("xbox") ||
+        title.includes("gameguard") ||
+        title.includes("nprotect"));
 }
 function isLikelyGameSession(session) {
     const title = normalizeAppKey(session.windowTitle);
@@ -8627,6 +8752,31 @@ function isLikelyGameSession(session) {
     if (GAME_PROCESS_HINTS.some((hint) => combined.includes(hint)))
         return true;
     return title.length > 0 && processName.length > 0;
+}
+const DEFAULT_IGNORED_PROCESSES = [
+    "powershell",
+    "pwsh",
+    "windowsterminal",
+    "cmd",
+    "conhost",
+];
+const GAME_TARGET_GRACE_MS = 2500;
+function normalizeIgnoredProcesses(value) {
+    const userValues = Array.isArray(value)
+        ? value
+            .map((item) => (typeof item === "string" ? item.trim() : ""))
+            .filter(Boolean)
+            .map((item) => stripExecutableSuffix(item.toLowerCase()))
+        : [];
+    return Array.from(new Set([...DEFAULT_IGNORED_PROCESSES, ...userValues]));
+}
+function isLikelyGameForeground(foreground) {
+    if (!foreground)
+        return false;
+    const combined = `${normalizeAppKey(foreground.name)} ${normalizeAppKey(foreground.title)}`;
+    if (NON_GAME_PROCESS_HINTS.some((hint) => combined.includes(hint)))
+        return false;
+    return GAME_PROCESS_HINTS.some((hint) => combined.includes(hint));
 }
 let ActiveWindowVolumeAction = (() => {
     let _classDecorators = [action({ UUID: "com.makomi.volumemixer.activewindow" })];
@@ -8645,11 +8795,15 @@ let ActiveWindowVolumeAction = (() => {
         }
         timers = new Map();
         lastAudioTargets = new Map();
+        lastGameTargets = new Map();
         quickVolumes = new Map();
+        settingsCache = new Map();
+        lastResolutionLog = new Map();
         async onWillAppear(ev) {
             if (!ev.action.isDial())
                 return;
             const dialAction = ev.action;
+            this.settingsCache.set(dialAction.id, ev.payload.settings);
             await dialAction.setFeedbackLayout(VOLUME_LAYOUT);
             await this.refreshDisplay(dialAction);
             const t = setInterval(() => this.refreshDisplay(dialAction), 400);
@@ -8661,9 +8815,12 @@ let ActiveWindowVolumeAction = (() => {
                 clearInterval(t);
                 this.timers.delete(ev.action.id);
             }
+            this.settingsCache.delete(ev.action.id);
+            this.lastGameTargets.delete(ev.action.id);
         }
         async onDialRotate(ev) {
             const { ticks, settings } = ev.payload;
+            this.settingsCache.set(ev.action.id, settings);
             const target = await this.resolveTarget(ev.action.id);
             if (target.sessions.length === 0)
                 return;
@@ -8676,6 +8833,7 @@ let ActiveWindowVolumeAction = (() => {
                 await this.refreshDisplay(ev.action);
         }
         async onDialDown(ev) {
+            this.settingsCache.set(ev.action.id, ev.payload.settings);
             const target = await this.resolveTarget(ev.action.id);
             if (target.sessions.length === 0)
                 return;
@@ -8685,6 +8843,7 @@ let ActiveWindowVolumeAction = (() => {
                 await this.refreshDisplay(ev.action);
         }
         async onTouchTap(ev) {
+            this.settingsCache.set(ev.action.id, ev.payload.settings);
             const target = await this.resolveTarget(ev.action.id);
             if (target.sessions.length === 0)
                 return;
@@ -8696,13 +8855,19 @@ let ActiveWindowVolumeAction = (() => {
             const payload = ev.payload;
             if (payload.event !== "requestForeground")
                 return;
+            const liveSettings = await ev.action.getSettings();
+            this.settingsCache.set(ev.action.id, liveSettings);
             const target = await this.resolveTarget(ev.action.id);
+            const settings = this.settingsCache.get(ev.action.id) ?? liveSettings;
+            const ignoredProcesses = normalizeIgnoredProcesses(settings.ignoredProcesses);
             if (!target.foreground && target.sessions.length === 0) {
-                await streamDeck.ui.sendToPropertyInspector({ foreground: null });
+                await streamDeck.ui.sendToPropertyInspector({ foreground: null, ignoredProcesses, logPath: getDebugLogPath() });
                 return;
             }
             const session = target.sessions[0];
             await streamDeck.ui.sendToPropertyInspector({
+                ignoredProcesses,
+                logPath: getDebugLogPath(),
                 foreground: {
                     name: target.foreground?.name ?? "",
                     displayName: session?.windowTitle ||
@@ -8714,6 +8879,7 @@ let ActiveWindowVolumeAction = (() => {
                     volume: session?.volume ?? null,
                     muted: session?.muted ?? false,
                     hasAudio: target.sessions.length > 0,
+                    ignored: this.isIgnoredForeground(target.foreground, ignoredProcesses),
                     icon: session ? (await audioService.getIcon(session.pid).catch(() => null)) ?? "" : "",
                 },
             });
@@ -8759,12 +8925,21 @@ let ActiveWindowVolumeAction = (() => {
         async resolveTarget(actionId) {
             const foreground = await audioService.getForeground();
             const sessions = await audioService.listSessions();
-            if (foreground) {
+            const settings = this.settingsCache.get(actionId);
+            const ignoredProcesses = normalizeIgnoredProcesses(settings?.ignoredProcesses);
+            if (foreground && !this.isIgnoredForeground(foreground, ignoredProcesses)) {
                 const foregroundSessions = this.findForegroundSessions(sessions, foreground);
                 if (foregroundSessions.length > 0) {
                     const session = foregroundSessions[0];
                     this.lastAudioTargets.set(actionId, {
                         processName: session.name,
+                        displayName: session.windowTitle || session.displayName || foreground.title || foreground.name,
+                        isGame: isLikelyGameSession(session) || isLikelyGameForeground(foreground),
+                        updatedAt: Date.now(),
+                    });
+                    this.updateGameCache(actionId, session, foreground);
+                    this.logResolution(actionId, "foreground-match", foreground, foregroundSessions, {
+                        ignoredProcesses,
                         displayName: session.windowTitle || session.displayName || foreground.title || foreground.name,
                     });
                     return {
@@ -8779,6 +8954,13 @@ let ActiveWindowVolumeAction = (() => {
                     this.lastAudioTargets.set(actionId, {
                         processName: session.name,
                         displayName: session.windowTitle || session.displayName || session.name,
+                        isGame: true,
+                        updatedAt: Date.now(),
+                    });
+                    this.updateGameCache(actionId, session, foreground);
+                    this.logResolution(actionId, "launcher-game-fallback", foreground, launcherGameSessions, {
+                        ignoredProcesses,
+                        displayName: session.windowTitle || session.displayName || session.name,
                     });
                     return {
                         foreground,
@@ -8787,10 +8969,32 @@ let ActiveWindowVolumeAction = (() => {
                     };
                 }
             }
+            const cachedGame = this.lastGameTargets.get(actionId);
+            if (cachedGame) {
+                const cachedGameSessions = this.findSessionsByCachedTarget(sessions, cachedGame);
+                if (cachedGameSessions.length > 0) {
+                    this.logResolution(actionId, "cached-game", foreground, cachedGameSessions, {
+                        ignoredProcesses,
+                        cachedGame,
+                        gameGraceActive: this.isGameGraceActive(cachedGame),
+                        gameForeground: isLikelyGameForeground(foreground),
+                        launcherSurface: isLauncherOrOverlaySurface(foreground ?? { name: "", title: "" }),
+                    });
+                    return {
+                        foreground,
+                        displayName: cachedGame.displayName,
+                        sessions: cachedGameSessions,
+                    };
+                }
+            }
             const cached = this.lastAudioTargets.get(actionId);
             if (cached) {
-                const cachedSessions = this.findSessionsByProcessName(sessions, cached.processName);
+                const cachedSessions = this.findSessionsByCachedTarget(sessions, cached);
                 if (cachedSessions.length > 0) {
+                    this.logResolution(actionId, "cached-audio", foreground, cachedSessions, {
+                        ignoredProcesses,
+                        cached,
+                    });
                     return {
                         foreground,
                         displayName: cached.displayName,
@@ -8798,6 +9002,10 @@ let ActiveWindowVolumeAction = (() => {
                     };
                 }
             }
+            this.logResolution(actionId, "no-match", foreground, [], {
+                ignoredProcesses,
+                sessionCount: sessions.length,
+            });
             return {
                 foreground,
                 displayName: foreground?.name ?? "",
@@ -8808,37 +9016,100 @@ let ActiveWindowVolumeAction = (() => {
             const direct = sessions.filter((s) => s.pid === foreground.pid);
             if (direct.length > 0)
                 return direct;
-            const name = foreground.name.toLowerCase();
-            const byProcess = sessions.filter((s) => s.name.toLowerCase() === name ||
-                s.name.toLowerCase().replace(".exe", "") === name.replace(".exe", ""));
+            const byProcess = sessions.filter((s) => aliasMatches(s.name, foreground.name));
             if (byProcess.length > 0)
                 return byProcess;
             const foregroundTitle = normalizeAppKey(foreground.title);
-            if (!foregroundTitle)
+            const scored = sessions
+                .map((session) => ({
+                session,
+                score: this.scoreForegroundSessionMatch(session, foreground, foregroundTitle),
+            }))
+                .filter((entry) => entry.score > 0)
+                .sort((a, b) => b.score - a.score);
+            if (scored.length === 0)
                 return [];
-            return sessions.filter((s) => {
-                const title = normalizeAppKey(s.windowTitle);
-                const displayName = normalizeAppKey(s.displayName);
-                const processName = normalizeAppKey(s.name);
-                return (title === foregroundTitle ||
-                    displayName === foregroundTitle ||
-                    processName === foregroundTitle ||
-                    (title.length > 0 && (title.includes(foregroundTitle) || foregroundTitle.includes(title))) ||
-                    (displayName.length > 0 &&
-                        (displayName.includes(foregroundTitle) || foregroundTitle.includes(displayName))) ||
-                    (processName.length > 0 &&
-                        (processName.includes(foregroundTitle) || foregroundTitle.includes(processName))));
-            });
+            const bestScore = scored[0].score;
+            return scored.filter((entry) => entry.score === bestScore).map((entry) => entry.session);
         }
         findSessionsByProcessName(sessions, processName) {
-            const name = processName.toLowerCase();
-            return sessions.filter((s) => s.name.toLowerCase() === name ||
-                s.name.toLowerCase().replace(".exe", "") === name.replace(".exe", ""));
+            return sessions.filter((s) => aliasMatches(s.name, processName));
+        }
+        updateGameCache(actionId, session, foreground) {
+            if (!isLikelyGameSession(session) && !isLikelyGameForeground(foreground))
+                return;
+            this.lastGameTargets.set(actionId, {
+                processName: session.name,
+                displayName: session.windowTitle || session.displayName || foreground.title || session.name,
+                isGame: true,
+                updatedAt: Date.now(),
+            });
+        }
+        isGameGraceActive(target) {
+            return typeof target.updatedAt === "number" && Date.now() - target.updatedAt <= GAME_TARGET_GRACE_MS;
+        }
+        logResolution(actionId, reason, foreground, sessions, extra) {
+            const summary = {
+                reason,
+                foreground: foreground
+                    ? { pid: foreground.pid, name: foreground.name, title: foreground.title ?? "" }
+                    : null,
+                matches: sessions.slice(0, 4).map((session) => ({
+                    pid: session.pid,
+                    name: session.name,
+                    displayName: session.displayName,
+                    windowTitle: session.windowTitle ?? "",
+                    volume: Math.round(session.volume * 100),
+                    muted: session.muted,
+                })),
+                ...(extra ?? {}),
+            };
+            const signature = JSON.stringify(summary);
+            if (this.lastResolutionLog.get(actionId) === signature)
+                return;
+            this.lastResolutionLog.set(actionId, signature);
+            writeDebugLog("active-window", "resolved target", summary);
+        }
+        isIgnoredForeground(foreground, ignoredProcesses) {
+            if (!foreground)
+                return false;
+            const foregroundName = stripExecutableSuffix(foreground.name.toLowerCase());
+            return ignoredProcesses.some((ignored) => aliasMatches(foregroundName, ignored));
+        }
+        findSessionsByCachedTarget(sessions, cached) {
+            const scored = sessions
+                .map((session) => ({
+                session,
+                score: this.scoreCachedSessionMatch(session, cached),
+            }))
+                .filter((entry) => entry.score > 0)
+                .sort((a, b) => b.score - a.score);
+            if (scored.length === 0)
+                return [];
+            const bestScore = scored[0].score;
+            return scored.filter((entry) => entry.score === bestScore).map((entry) => entry.session);
         }
         findLauncherGameSessions(sessions, foreground) {
             if (!isLauncherOrOverlaySurface(foreground))
                 return [];
-            return sessions.filter(isLikelyGameSession);
+            const foregroundTitle = normalizeAppKey(foreground.title);
+            const scored = sessions
+                .filter(isLikelyGameSession)
+                .map((session) => ({
+                session,
+                score: this.scoreForegroundSessionMatch(session, { pid: -1, ...foreground }, foregroundTitle),
+            }))
+                .sort((a, b) => b.score - a.score);
+            if (scored.length === 0)
+                return [];
+            const positive = scored.filter((entry) => entry.score > 0);
+            if (positive.length > 0) {
+                const bestScore = positive[0].score;
+                return positive
+                    .filter((entry) => entry.score === bestScore)
+                    .map((entry) => entry.session);
+            }
+            return scored.slice(0, 1).map((entry) => entry.session);
         }
         getDisplayVolume(actionId, sessions) {
             const quick = this.quickVolumes.get(actionId);
@@ -8846,6 +9117,65 @@ let ActiveWindowVolumeAction = (() => {
                 return quick.volume;
             }
             return sessions.reduce((sum, s) => sum + s.volume, 0) / sessions.length;
+        }
+        scoreForegroundSessionMatch(session, foreground, foregroundTitle) {
+            let score = 0;
+            if (session.pid === foreground.pid)
+                score += 1000;
+            score += scoreAliasOverlap(session.name, foreground.name);
+            score += scoreAliasOverlap(session.displayName, foreground.name);
+            score += scoreAliasOverlap(session.windowTitle, foreground.name);
+            const sessionTitle = normalizeAppKey(session.windowTitle);
+            const sessionDisplayName = normalizeAppKey(session.displayName);
+            const sessionProcessName = normalizeAppKey(stripExecutableSuffix(session.name));
+            if (foregroundTitle) {
+                if (sessionTitle === foregroundTitle)
+                    score += 400;
+                else if (sessionTitle && (sessionTitle.includes(foregroundTitle) || foregroundTitle.includes(sessionTitle)))
+                    score += 180;
+                if (sessionDisplayName === foregroundTitle)
+                    score += 320;
+                else if (sessionDisplayName &&
+                    (sessionDisplayName.includes(foregroundTitle) || foregroundTitle.includes(sessionDisplayName)))
+                    score += 140;
+                if (sessionProcessName === foregroundTitle)
+                    score += 260;
+                else if (sessionProcessName &&
+                    (sessionProcessName.includes(foregroundTitle) || foregroundTitle.includes(sessionProcessName)))
+                    score += 120;
+            }
+            return score;
+        }
+        scoreCachedSessionMatch(session, cached) {
+            let score = 0;
+            if (aliasMatches(session.name, cached.processName))
+                score += 260;
+            score += scoreAliasOverlap(session.displayName, cached.displayName);
+            score += scoreAliasOverlap(session.windowTitle, cached.displayName);
+            score += scoreAliasOverlap(session.name, cached.displayName);
+            const cachedDisplay = normalizeAppKey(cached.displayName);
+            const sessionTitle = normalizeAppKey(session.windowTitle);
+            const sessionDisplayName = normalizeAppKey(session.displayName);
+            const sessionProcessName = normalizeAppKey(stripExecutableSuffix(session.name));
+            if (cachedDisplay) {
+                if (sessionTitle === cachedDisplay)
+                    score += 360;
+                else if (sessionTitle && (sessionTitle.includes(cachedDisplay) || cachedDisplay.includes(sessionTitle)))
+                    score += 180;
+                if (sessionDisplayName === cachedDisplay)
+                    score += 320;
+                else if (sessionDisplayName &&
+                    (sessionDisplayName.includes(cachedDisplay) || cachedDisplay.includes(sessionDisplayName)))
+                    score += 150;
+                if (sessionProcessName === cachedDisplay)
+                    score += 200;
+                else if (sessionProcessName &&
+                    (sessionProcessName.includes(cachedDisplay) || cachedDisplay.includes(sessionProcessName)))
+                    score += 100;
+            }
+            if (isLikelyGameSession(session))
+                score += 40;
+            return score;
         }
     });
     return _classThis;
