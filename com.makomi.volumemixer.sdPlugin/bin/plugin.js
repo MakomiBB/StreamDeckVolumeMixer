@@ -8688,6 +8688,44 @@ const GAME_PROCESS_HINTS = [
     "rainbowsix",
     "r6",
     "pubg",
+    // additional titles
+    "forza",
+    "deathstranding",
+    "witcher",
+    "darksouls",
+    "sekiro",
+    "eldenring",
+    "dragonage",
+    "masseffect",
+    "fallout",
+    "monsterhunter",
+    "persona",
+    "hades",
+    "hollowknight",
+    "deepskyderelicts",
+    "outriders",
+    "ghostrunner",
+    "deathloop",
+    "control",
+    "doom",
+    "wolfenstein",
+    "borderlands",
+    "bioshock",
+    "dishonored",
+    "prey",
+    "xcom",
+    "civilization",
+    "totalwar",
+    "deeprockgalactic",
+    "vermintide",
+    "darktide",
+    "reddeadredemption",
+    "thelastofus",
+    "horizon",
+    "godofwar",
+    "spiderman",
+    "uncharted",
+    "ghostoftsushima",
 ];
 const NON_GAME_PROCESS_HINTS = [
     "chrome",
@@ -8969,6 +9007,19 @@ let ActiveWindowVolumeAction = (() => {
                     };
                 }
             }
+            // Fix: clear stale game cache when a confirmed different game takes focus.
+            // Prevents wrong displayName (Forza) being shown while a new game (Helldivers) is active.
+            if (foreground && isLikelyGameForeground(foreground) && !this.isIgnoredForeground(foreground, ignoredProcesses)) {
+                const staleGame = this.lastGameTargets.get(actionId);
+                if (staleGame && !aliasMatches(foreground.name, staleGame.processName)) {
+                    this.lastGameTargets.delete(actionId);
+                    writeDebugLog("active-window", "game cache invalidated", {
+                        reason: "different game in foreground",
+                        foreground: foreground.name,
+                        evicted: staleGame.processName,
+                    });
+                }
+            }
             const cachedGame = this.lastGameTargets.get(actionId);
             if (cachedGame) {
                 const cachedGameSessions = this.findSessionsByCachedTarget(sessions, cachedGame);
@@ -9027,8 +9078,27 @@ let ActiveWindowVolumeAction = (() => {
             }))
                 .filter((entry) => entry.score > 0)
                 .sort((a, b) => b.score - a.score);
-            if (scored.length === 0)
+            if (scored.length === 0) {
+                // Fix: fallback for games where audio runs under a different PID/process name
+                // (e.g. EasyAntiCheat wrapper, Steam subprocess). Match by shared game keyword.
+                if (isLikelyGameForeground(foreground)) {
+                    const foregroundKey = `${normalizeAppKey(foreground.name)} ${normalizeAppKey(foreground.title)}`;
+                    const matchingHints = GAME_PROCESS_HINTS.filter((hint) => foregroundKey.includes(hint));
+                    if (matchingHints.length > 0) {
+                        const hintSessions = sessions.filter((s) => {
+                            const sessionKey = `${normalizeAppKey(s.name)} ${normalizeAppKey(s.displayName)} ${normalizeAppKey(s.windowTitle)}`;
+                            return matchingHints.some((hint) => sessionKey.includes(hint));
+                        });
+                        if (hintSessions.length > 0)
+                            return hintSessions;
+                    }
+                    // Last resort: exactly one game session active — safe to assume it's the foreground game
+                    const gameSessions = sessions.filter(isLikelyGameSession);
+                    if (gameSessions.length === 1)
+                        return gameSessions;
+                }
                 return [];
+            }
             const bestScore = scored[0].score;
             return scored.filter((entry) => entry.score === bestScore).map((entry) => entry.session);
         }
@@ -9173,8 +9243,8 @@ let ActiveWindowVolumeAction = (() => {
                     (sessionProcessName.includes(cachedDisplay) || cachedDisplay.includes(sessionProcessName)))
                     score += 100;
             }
-            if (isLikelyGameSession(session))
-                score += 40;
+            // Removed: isLikelyGameSession +40 bonus caused ANY game session to score >0 against
+            // a stale game cache, returning wrong sessions (e.g. Helldivers matched Forza cache).
             return score;
         }
     });
